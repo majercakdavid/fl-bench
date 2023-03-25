@@ -5,10 +5,10 @@ from collections import Counter
 from typing import Dict
 
 import numpy as np
-from path import Path
+from pathlib import Path
 from PIL import Image
 
-_DATA_ROOT = Path(__file__).parent.parent.abspath()
+_DATA_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def prune_args(args: Namespace) -> Dict:

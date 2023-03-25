@@ -1,12 +1,13 @@
+import os
 from collections import OrderedDict
 from typing import List, Optional, OrderedDict, Tuple, Union
 
 import torch
 import random
 import numpy as np
-from path import Path
+from pathlib import Path
 
-_PROJECT_DIR = Path(__file__).parent.parent.parent.abspath()
+_PROJECT_DIR = Path(os.path.abspath(__file__)).parent.parent.parent
 LOG_DIR = _PROJECT_DIR / "logs"
 TEMP_DIR = _PROJECT_DIR / "temp"
 

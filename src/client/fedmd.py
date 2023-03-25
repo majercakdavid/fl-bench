@@ -36,6 +36,9 @@ class FedMDClient(FedAvgClient):
         self.consensus: List[torch.Tensor] = []
         self.mse_criterion = torch.nn.MSELoss()
 
+        if self.args.public_batch_num < 0:
+            self.args.public_batch_num = len(self.iter_public_loader)
+
     def load_public_data_batches(self):
         for _ in range(self.args.public_batch_num):
             try:

@@ -1,23 +1,25 @@
+import os
 import pickle
 import sys
 import json
 import os
 import random
+import typing
 from argparse import Namespace
 from collections import OrderedDict
 from copy import deepcopy
 from typing import Dict, List
 
+import mlflow
 import torch
 from visdom import Visdom
-from path import Path
+from pathlib import Path
 from rich.console import Console
 from rich.progress import track
 from tqdm import tqdm
 
-_PROJECT_DIR = Path(__file__).parent.parent.parent.abspath()
-
-sys.path.append(_PROJECT_DIR)
+_PROJECT_DIR = Path(os.path.abspath(__file__)).parent.parent.parent
+sys.path.append(str(_PROJECT_DIR))
 
 from src.config.utils import LOG_DIR, fix_random_seed, trainable_params
 from src.config.models import MODEL_DICT
@@ -30,7 +32,7 @@ class FedAvgServer:
         self,
         algo: str = "FedAvg",
         args: Namespace = None,
-        unique_model=False,
+        unique_model=True,
         default_trainer=True,
     ):
         self.args = get_fedavg_argparser().parse_args() if args is None else args
@@ -49,10 +51,13 @@ class FedAvgServer:
             with open(partition_path, "rb") as f:
                 partition = pickle.load(f)
         except:
-            raise FileNotFoundError(f"Please partition {args.dataset} first.")
+            raise FileNotFoundError(f"Please partition {self.args.dataset} first.")
         self.train_clients = partition["separation"]["train"]
         self.test_clients = partition["separation"]["test"]
         self.client_num_in_total = partition["separation"]["total"]
+
+        if self.args.pretrain_epoch > 0:
+            self.data_indices_pretrain: List[List[int]] = partition["data_indices_pretrain"]
 
         # init model(s) parameters
         self.device = torch.device(
@@ -63,22 +68,22 @@ class FedAvgServer:
         self.trainable_params_name, init_trainable_params = trainable_params(
             self.model, requires_name=True
         )
-        # client_trainable_params is for pFL, which outputs exclusive model per client
         # global_params_dict is for regular FL, which outputs a single global model
-        if self.unique_model:
-            self.client_trainable_params: List[List[torch.Tensor]] = [
-                deepcopy(init_trainable_params) for _ in self.train_clients
-            ]
         self.global_params_dict: OrderedDict[str, torch.nn.Parameter] = OrderedDict(
             zip(self.trainable_params_name, deepcopy(init_trainable_params))
         )
+        # client_trainable_params is for pFL, which outputs exclusive model per client
+        if self.unique_model:
+            self.client_trainable_params: List[List[torch.Tensor]] = [
+                deepcopy(list(self.global_params_dict.values())) for _ in self.train_clients
+            ]
 
         # To make sure all algorithms run through the same client sampling stream.
         # Some algorithms' implicit operations at client side may disturb the stream if sampling happens at each FL round's beginning.
         self.client_sample_stream = [
-            random.sample(
+            sorted(random.sample(
                 self.train_clients, int(self.client_num_in_total * self.args.join_ratio)
-            )
+            ))
             for _ in range(self.args.global_epoch)
         ]
         self.selected_clients: List[int] = []
@@ -97,6 +102,15 @@ class FedAvgServer:
         self.clients_acc_stats = {i: {} for i in self.train_clients}
         self.logger = Console(record=self.args.log, log_path=False, log_time=False)
         self.test_results: Dict[int, Dict[str, str]] = {}
+        self.pretrain_progress_bar = (
+            track(
+                range(self.args.pretrain_epoch),
+                "[bold green]Pre-Training...",
+                console=self.logger,
+            )
+            if not self.args.log
+            else tqdm(range(self.args.pretrain_epoch), "Pre-Training...")
+        )
         self.train_progress_bar = (
             track(
                 range(self.args.global_epoch),
@@ -114,6 +128,85 @@ class FedAvgServer:
         self.trainer = None
         if default_trainer:
             self.trainer = FedAvgClient(deepcopy(self.model), self.args, self.logger)
+
+    def pretrain(self):
+        from torch.optim import SGD
+        from torch.utils.data import DataLoader, Subset
+        from torchvision.transforms import Compose, Normalize
+
+        from data.utils.constants import MEAN, STD
+        from data.utils.datasets import DATASETS
+
+        criterion = torch.nn.CrossEntropyLoss().to(self.device)
+        optimizer = SGD(
+            trainable_params(self.model),
+            self.args.pretrain_lr,
+            self.args.momentum,
+            self.args.weight_decay,
+        )
+
+        transform = Compose(
+            [Normalize(MEAN[self.args.dataset], STD[self.args.dataset])]
+        )
+        target_transform = None
+
+        dataset = DATASETS[self.args.dataset](
+            root=_PROJECT_DIR / "data" / self.args.dataset,
+            args=self.args.dataset_args,
+            transform=transform,
+            target_transform=target_transform,
+        )
+
+        pretrainset = Subset(dataset, indices=self.data_indices_pretrain)
+        pretrainloader = DataLoader(pretrainset, self.args.batch_size)
+
+        self.model = self.model.to(self.device)
+        self.model.train()
+        correct_sum, loss_sum = 0, 0
+        for E in self.pretrain_progress_bar:
+            self.current_epoch = E
+
+            if (E + 1) % self.args.verbose_gap == 0:
+                self.logger.log("-" * 26, f"PRETRAINING EPOCH: {E + 1}", "-" * 26)
+
+            correct_sum, loss_sum = 0, 0
+            for x, y in pretrainloader:
+                # when the current batch size is 1, the batchNorm2d modules in the model would raise error.
+                # So the latent size 1 data batches are discarded.
+                if len(x) <= 1:
+                    continue
+
+                x, y = x.to(self.device), y.to(self.device)
+                logits = self.model(x)
+                loss = criterion(logits, y)
+
+                pred = torch.argmax(logits, -1)
+                correct_sum += (pred == y).sum().item()
+                loss_sum += loss.item()
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+            mean_accuracy = correct_sum / float(max(len(pretrainset), 1))
+            mean_loss = loss_sum / float(max(len(pretrainset), 1))
+
+            mlflow.log_metric("pretrain_accuracy", mean_accuracy, step=E)
+            mlflow.log_metric("pretrain_loss", mean_loss, step=E)
+
+        
+        self.trainable_params_name, init_trainable_params = trainable_params(
+            self.model, requires_name=True
+        )
+        # global_params_dict is for regular FL, which outputs a single global model
+        self.global_params_dict: OrderedDict[str, torch.nn.Parameter] = OrderedDict(
+            zip(self.trainable_params_name, deepcopy(init_trainable_params))
+        )
+        # client_trainable_params is for pFL, which outputs exclusive model per client
+        if self.unique_model:
+            self.client_trainable_params: List[List[torch.Tensor]] = [
+                deepcopy(list(self.global_params_dict.values())) for _ in self.train_clients
+            ]
 
     def train(self):
         for E in self.train_progress_bar:
@@ -165,6 +258,9 @@ class FedAvgServer:
         correct_after = torch.tensor(correct_after)
         num_samples = torch.tensor(num_samples)
 
+        mlflow.log_metric("test_loss", (loss_after/num_samples).mean().item())
+        mlflow.log_metric("test_acc", (correct_after/num_samples).mean().item())
+
         self.test_results[self.current_epoch + 1] = {
             "loss": "{:.4f} -> {:.4f}".format(
                 loss_before.sum() / num_samples.sum(),
@@ -188,7 +284,7 @@ class FedAvgServer:
                 "FL system don't preserve params for each client (unique_model = False)."
             )
 
-    def generate_client_params(self, client_id: int) -> OrderedDict[str, torch.Tensor]:
+    def generate_client_params(self, client_id: int) -> typing.OrderedDict[str, torch.Tensor]:
         if self.unique_model:
             return OrderedDict(
                 zip(self.trainable_params_name, self.client_trainable_params[client_id])
@@ -370,6 +466,10 @@ class FedAvgServer:
                 / test_num_samples.sum()
                 * 100.0
             ).item()
+            
+            print("Test accuracy (before): {:.2f}%".format(test_acc_before))
+            print("Test accuracy (after): {:.2f}%".format(test_acc_after))
+
             if self.args.visible:
                 self.viz.line(
                     [test_acc_before],
@@ -390,6 +490,7 @@ class FedAvgServer:
                     update="append",
                     name="test_acc(after)",
                 )
+            mlflow.log_metric("test_acc_running", test_acc_after/100)
 
         if self.args.eval_train:
             train_correct_before = torch.tensor(
@@ -427,6 +528,10 @@ class FedAvgServer:
                 / train_num_samples.sum()
                 * 100.0
             ).item()
+
+            print("Train accuracy (before): {:.2f}%".format(train_acc_before))
+            print("Train accuracy (after): {:.2f}%".format(train_acc_after))
+            
             if self.args.visible:
                 self.viz.line(
                     [train_acc_before],
@@ -447,6 +552,7 @@ class FedAvgServer:
                     update="append",
                     name="train_acc(after)",
                 )
+            mlflow.log_metric("train_acc_running", train_acc_after)
 
         if self.args.save_allstats:
             for client_id in self.selected_clients:
@@ -464,6 +570,12 @@ class FedAvgServer:
 
         if self.args.visible:
             self.viz.close(win=self.viz_win_name)
+
+        if self.args.pretrain_epoch > 0:
+            self.pretrain()
+
+        # Test before training
+        self.test()
 
         self.train()
 

@@ -1,17 +1,20 @@
+import os
 import pickle
 from argparse import Namespace
 from collections import OrderedDict
+import typing
 from copy import deepcopy
 from typing import Dict, List, Tuple
 
+import mlflow
 import torch
-from path import Path
+from pathlib import Path
 from rich.console import Console
 from torch.optim import SGD
 from torch.utils.data import DataLoader, Subset
 from torchvision.transforms import Compose, Normalize
 
-_PROJECT_DIR = Path(__file__).parent.parent.parent.abspath()
+_PROJECT_DIR = Path(os.path.abspath(__file__)).parent.parent.parent
 
 from src.config.utils import trainable_params
 from src.config.models import DecoupledModel
@@ -111,10 +114,20 @@ class FedAvgClient:
                     )
                 )
 
+        mlflow.log_metric(f"train_acc_{self.client_id}", after["train"]["correct"] / before["train"]["size"])
+        mlflow.log_metric(f"train_acc_{self.client_id}", after["train"]["correct"] / after["train"]["size"])
+        mlflow.log_metric(f"train_loss_{self.client_id}", after["train"]["loss"] / before["train"]["size"])
+        mlflow.log_metric(f"train_loss_{self.client_id}", after["train"]["loss"] / after["train"]["size"])
+
+        mlflow.log_metric(f"test_acc_{self.client_id}", after["test"]["correct"] / before["test"]["size"])
+        mlflow.log_metric(f"test_acc_{self.client_id}", after["test"]["correct"] / after["test"]["size"])
+        mlflow.log_metric(f"test_loss_{self.client_id}", after["test"]["loss"] / before["test"]["size"])
+        mlflow.log_metric(f"test_loss_{self.client_id}", after["test"]["loss"] / after["test"]["size"])
+        
         eval_stats = {"before": before, "after": after}
         return eval_stats
 
-    def set_parameters(self, new_parameters: OrderedDict[str, torch.nn.Parameter]):
+    def set_parameters(self, new_parameters: typing.OrderedDict[str, torch.nn.Parameter]):
         personal_parameters = self.init_personal_params_dict
         if self.client_id in self.personal_params_dict.keys():
             personal_parameters = self.personal_params_dict[self.client_id]
@@ -135,7 +148,7 @@ class FedAvgClient:
     def train(
         self,
         client_id: int,
-        new_parameters: OrderedDict[str, torch.nn.Parameter],
+        new_parameters: typing.OrderedDict[str, torch.nn.Parameter],
         return_diff=True,
         verbose=False,
     ) -> Tuple[List[torch.nn.Parameter], int, Dict]:
@@ -175,6 +188,20 @@ class FedAvgClient:
                 loss.backward()
                 self.optimizer.step()
 
+    def finetune(self):
+        self.model.train()
+        for _ in range(self.args.finetune_epoch):
+            for x, y in self.trainloader:
+                if len(x) <= 1:
+                    continue
+
+                x, y = x.to(self.device), y.to(self.device)
+                logit = self.model(x)
+                loss = self.criterion(logit, y)
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
+
     @torch.no_grad()
     def evaluate(self) -> Dict[str, Dict[str, float]]:
         self.model.eval()
@@ -189,6 +216,9 @@ class FedAvgClient:
                 test_loss += criterion(logits, y).item()
                 pred = torch.argmax(logits, -1)
                 test_correct += (pred == y).sum().item()
+            
+            # mlflow.log_metric(f"eval_test_loss_{self.client_id}", test_loss)
+            # mlflow.log_metric(f"eval_test_acc_{self.client_id}", test_correct)
 
         if len(self.trainset) > 0 and self.args.eval_train:
             for x, y in self.trainloader:
@@ -197,6 +227,9 @@ class FedAvgClient:
                 train_loss += criterion(logits, y).item()
                 pred = torch.argmax(logits, -1)
                 train_correct += (pred == y).sum().item()
+
+            # mlflow.log_metric(f"eval_train_loss_{self.client_id}", train_loss)
+            # mlflow.log_metric(f"eval_train_acc_{self.client_id}", train_correct)
 
         return {
             "train": {
@@ -212,34 +245,16 @@ class FedAvgClient:
         }
 
     def test(
-        self, client_id: int, new_parameters: OrderedDict[str, torch.nn.Parameter]
+        self, client_id: int, new_parameters: typing.OrderedDict[str, torch.nn.Parameter]
     ):
         self.client_id = client_id
         self.load_dataset()
         self.set_parameters(new_parameters)
-
-        before = {
-            "train": {"loss": 0, "correct": 0, "size": 1.0},
-            "test": {"loss": 0, "correct": 0, "size": 1.0},
-        }
-        after = deepcopy(before)
-
+        
         before = self.evaluate()
         if self.args.finetune_epoch > 0:
             self.finetune()
             after = self.evaluate()
+        else:
+            after = deepcopy(before)
         return {"before": before, "after": after}
-
-    def finetune(self):
-        self.model.train()
-        for _ in range(self.args.finetune_epoch):
-            for x, y in self.trainloader:
-                if len(x) <= 1:
-                    continue
-
-                x, y = x.to(self.device), y.to(self.device)
-                logit = self.model(x)
-                loss = self.criterion(logit, y)
-                self.optimizer.zero_grad()
-                loss.backward()
-                self.optimizer.step()

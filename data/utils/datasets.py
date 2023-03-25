@@ -6,7 +6,7 @@ import numpy as np
 import torchvision
 import os
 import pandas as pd
-from path import Path
+from pathlib import Path
 from PIL import Image
 from torchvision.transforms.functional import pil_to_tensor
 from torch.utils.data import Dataset

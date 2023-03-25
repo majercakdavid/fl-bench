@@ -3,16 +3,17 @@ import os
 import pickle
 import random
 from argparse import ArgumentParser
+from collections import Counter
 
 import torch
 import numpy as np
-from path import Path
+from pathlib import Path
 
 from datasets import DATASETS
 from partition import dirichlet, iid_partition, randomly_assign_classes, allocate_shards
 from util import prune_args, generate_synthetic_data, process_celeba, process_femnist
 
-_CURRENT_DIR = Path(__file__).parent.abspath()
+_CURRENT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 
 
 def main(args):
@@ -24,6 +25,11 @@ def main(args):
 
     if not os.path.isdir(dataset_root):
         os.mkdir(dataset_root)
+
+    if args.pretrain_fraction > 0:
+        assert args.pretrain_fraction < 1 and int(args.pretrain_fraction * 100) == args.pretrain_fraction * 100, "pretrain_fraction should be a float number between 0 and 1 with at most 2 decimal places."
+        assert int(args.client_num_in_total/(1-args.pretrain_fraction)) == args.client_num_in_total/(1-args.pretrain_fraction), "client_num_in_total should be divisible by 1-pretrain_fraction without remainder."
+        args.client_num_in_total = int(args.client_num_in_total/(1-args.pretrain_fraction))
 
     partition = {"separation": None, "data_indices": None}
 
@@ -66,6 +72,20 @@ def main(args):
             partition, stats = iid_partition(
                 ori_dataset=ori_dataset, num_clients=args.client_num_in_total
             )
+
+    if args.pretrain_fraction > 0:
+        pretrain_stats = {"x": 0, "y": Counter()}
+        for i in range(int(args.pretrain_fraction*args.client_num_in_total), len(partition["data_indices"])):
+            pretrain_stats["x"] += stats[i]["x"]
+            pretrain_stats["y"].update(stats[i]["y"])
+
+            del stats[i]
+
+        stats["pretrain"] = pretrain_stats
+        partition["data_indices_pretrain"] = partition["data_indices"][int(args.pretrain_fraction*args.client_num_in_total):]
+        partition["data_indices_pretrain"]  = np.concatenate(partition["data_indices_pretrain"])
+        partition["data_indices"] = partition["data_indices"][:int(args.pretrain_fraction*args.client_num_in_total)]
+        args.client_num_in_total = int(args.client_num_in_total*(1-args.pretrain_fraction))
 
     if partition["separation"] is None:
         if args.split == "user":
@@ -132,21 +152,44 @@ if __name__ == "__main__":
             "tiny_imagenet",
             "cinic10",
         ],
-        default="cifar10",
+        default="cifar100",
     )
     parser.add_argument("--iid", type=int, default=0)
-    parser.add_argument("-cn", "--client_num_in_total", type=int, default=20)
+    parser.add_argument("-cn", "--client_num_in_total", type=int, default=100)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--split", type=str, choices=["sample", "user"], default="sample"
     )
-    parser.add_argument("--fraction", type=float, default=0.5)
+    parser.add_argument(
+        "--fraction", type=float, default=0.5, help="Propotion of train data/clients"
+    )
+    parser.add_argument(
+        "--pretrain_fraction", type=float, default=0.5, help="Propotion of pretrain data"
+    )
     # For random assigning classes only
-    parser.add_argument("-c", "--classes", type=int, default=0)
+    parser.add_argument(
+        "-c",
+        "--classes",
+        type=int,
+        default=0,
+        help="Num of classes that one client's data belong to.",
+    )
     # For allocate shards only
-    parser.add_argument("-s", "--shards", type=int, default=0)
+    parser.add_argument(
+        "-s",
+        "--shards",
+        type=int,
+        default=0,
+        help="Num of classes that one client's data belong to.",
+    )
     # For dirichlet distribution only
-    parser.add_argument("-a", "--alpha", type=float, default=0)
+    parser.add_argument(
+        "-a",
+        "--alpha",
+        type=float,
+        default=0.5,
+        help="Only for controling data hetero degree while performing Dirichlet partition.",
+    )
     parser.add_argument("-ls", "--least_samples", type=int, default=40)
 
     # For synthetic data only

@@ -3,6 +3,7 @@ __pycache__
 # configuration folders
 .vscode
 .idea
+mlruns/
 
 # dataset folders
 data/cifar10
