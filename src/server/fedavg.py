@@ -57,7 +57,8 @@ class FedAvgServer:
         self.client_num_in_total = partition["separation"]["total"]
 
         if self.args.pretrain_epoch > 0:
-            self.data_indices_pretrain: List[List[int]] = partition["data_indices_pretrain"]
+            self.data_indices_pretrain_train: List[List[int]] = partition["data_indices_pretrain"]["train"]
+            self.data_indices_pretrain_test: List[List[int]] = partition["data_indices_pretrain"]["test"]
 
         # init model(s) parameters
         self.device = torch.device(
@@ -157,20 +158,19 @@ class FedAvgServer:
             target_transform=target_transform,
         )
 
-        pretrainset = Subset(dataset, indices=self.data_indices_pretrain)
-        pretrainloader = DataLoader(pretrainset, self.args.batch_size)
+        pretrainset_train = Subset(dataset, indices=self.data_indices_pretrain_train)
+        pretrainset_test = Subset(dataset, indices=self.data_indices_pretrain_test)
+        pretrainloader_train = DataLoader(pretrainset_train, self.args.batch_size)
+        pretrainloader_test = DataLoader(pretrainset_test, self.args.batch_size)
 
         self.model = self.model.to(self.device)
-        self.model.train()
-        correct_sum, loss_sum = 0, 0
         for E in self.pretrain_progress_bar:
-            self.current_epoch = E
-
             if (E + 1) % self.args.verbose_gap == 0:
                 self.logger.log("-" * 26, f"PRETRAINING EPOCH: {E + 1}", "-" * 26)
 
+            self.model.train()
             correct_sum, loss_sum = 0, 0
-            for x, y in pretrainloader:
+            for x, y in pretrainloader_train:
                 # when the current batch size is 1, the batchNorm2d modules in the model would raise error.
                 # So the latent size 1 data batches are discarded.
                 if len(x) <= 1:
@@ -188,13 +188,37 @@ class FedAvgServer:
                 loss.backward()
                 optimizer.step()
 
-            mean_accuracy = correct_sum / float(max(len(pretrainset), 1))
-            mean_loss = loss_sum / float(max(len(pretrainset), 1))
+            mean_accuracy = correct_sum / float(max(len(pretrainset_train), 1))
+            mean_loss = loss_sum / float(max(len(pretrainset_train), 1))
 
-            mlflow.log_metric("pretrain_accuracy", mean_accuracy, step=E)
-            mlflow.log_metric("pretrain_loss", mean_loss, step=E)
+            mlflow.log_metric("pretrain_train_accuracy", mean_accuracy, step=E)
+            mlflow.log_metric("pretrain_train_loss", mean_loss, step=E)
+
+            self.model.eval()
+            correct_sum, loss_sum = 0, 0
+            with torch.no_grad():
+                for x, y in pretrainloader_test:
+                    # when the current batch size is 1, the batchNorm2d modules in the model would raise error.
+                    # So the latent size 1 data batches are discarded.
+                    if len(x) <= 1:
+                        continue
+
+                    x, y = x.to(self.device), y.to(self.device)
+                    logits = self.model(x)
+                    loss = criterion(logits, y)
+
+                    pred = torch.argmax(logits, -1)
+                    correct_sum += (pred == y).sum().item()
+                    loss_sum += loss.item()
+
+            mean_accuracy = correct_sum / float(max(len(pretrainset_test), 1))
+            mean_loss = loss_sum / float(max(len(pretrainset_test), 1))
+
+            mlflow.log_metric("pretrain_test_accuracy", mean_accuracy, step=E)
+            mlflow.log_metric("pretrain_test_loss", mean_loss, step=E)
 
         
+        self.model = self.model.to("cpu")
         self.trainable_params_name, init_trainable_params = trainable_params(
             self.model, requires_name=True
         )
@@ -258,6 +282,9 @@ class FedAvgServer:
         correct_after = torch.tensor(correct_after)
         num_samples = torch.tensor(num_samples)
 
+        mlflow.log_metric("test_loss", (loss_before/num_samples).mean().item())
+        mlflow.log_metric("test_acc", (correct_before/num_samples).mean().item())
+        
         mlflow.log_metric("test_loss", (loss_after/num_samples).mean().item())
         mlflow.log_metric("test_acc", (correct_after/num_samples).mean().item())
 

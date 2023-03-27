@@ -114,15 +114,15 @@ class FedAvgClient:
                     )
                 )
 
-        mlflow.log_metric(f"train_acc_{self.client_id}", after["train"]["correct"] / before["train"]["size"])
-        mlflow.log_metric(f"train_acc_{self.client_id}", after["train"]["correct"] / after["train"]["size"])
-        mlflow.log_metric(f"train_loss_{self.client_id}", after["train"]["loss"] / before["train"]["size"])
-        mlflow.log_metric(f"train_loss_{self.client_id}", after["train"]["loss"] / after["train"]["size"])
+        # mlflow.log_metric(f"train_acc_{self.client_id}", after["train"]["correct"] / before["train"]["size"])
+        # mlflow.log_metric(f"train_acc_{self.client_id}", after["train"]["correct"] / after["train"]["size"])
+        # mlflow.log_metric(f"train_loss_{self.client_id}", after["train"]["loss"] / before["train"]["size"])
+        # mlflow.log_metric(f"train_loss_{self.client_id}", after["train"]["loss"] / after["train"]["size"])
 
-        mlflow.log_metric(f"test_acc_{self.client_id}", after["test"]["correct"] / before["test"]["size"])
-        mlflow.log_metric(f"test_acc_{self.client_id}", after["test"]["correct"] / after["test"]["size"])
-        mlflow.log_metric(f"test_loss_{self.client_id}", after["test"]["loss"] / before["test"]["size"])
-        mlflow.log_metric(f"test_loss_{self.client_id}", after["test"]["loss"] / after["test"]["size"])
+        # mlflow.log_metric(f"test_acc_{self.client_id}", after["test"]["correct"] / before["test"]["size"])
+        # mlflow.log_metric(f"test_acc_{self.client_id}", after["test"]["correct"] / after["test"]["size"])
+        # mlflow.log_metric(f"test_loss_{self.client_id}", after["test"]["loss"] / before["test"]["size"])
+        # mlflow.log_metric(f"test_loss_{self.client_id}", after["test"]["loss"] / after["test"]["size"])
         
         eval_stats = {"before": before, "after": after}
         return eval_stats
@@ -188,6 +188,8 @@ class FedAvgClient:
                 loss.backward()
                 self.optimizer.step()
 
+                # mlflow.log_metric(f"train_loss_running_{self.client_id}", loss.item())
+
     def finetune(self):
         self.model.train()
         for _ in range(self.args.finetune_epoch):
@@ -201,6 +203,8 @@ class FedAvgClient:
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
+
+                # mlflow.log_metric(f"train_loss_running_finetune_{self.client_id}", loss.item())
 
     @torch.no_grad()
     def evaluate(self) -> Dict[str, Dict[str, float]]:

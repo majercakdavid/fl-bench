@@ -1,0 +1,50 @@
+$schema: https://azuremlschemas.azureedge.net/latest/sweepJob.schema.json
+type: sweep
+# name: pfl_benc
+display_name: Personalized FL - BENCH
+experiment_name: horizontal_personalized_federated_learning
+
+compute: azureml:gpu-V100-1-eus
+
+sampling_algorithm: 
+  type: grid
+search_space:
+  alg:
+    type: choice
+    values: ["fedavg"] # , "moon", "fedmd", "fedbabu", "fedper", "feddyn", "fedrep", "fedper", "perfedavg"]
+  iid:
+    type: choice
+    values: [0, 1]
+objective:
+  goal: maximize
+  primary_metric: test_acc
+limits:
+  max_total_trials: 100
+
+trial:
+  code: .
+  command: >-
+    export PATH=/usr/local/cuda/bin:$PATH &&
+    cd data/utils && python run.py 
+    --dataset=cifar10 
+    --alpha=0.5 
+    --client_num_in_total=10
+    --fraction=0.8
+    --pretrain_fraction=0.8 
+    --iid=${{search_space.iid}} &&
+    cd ../.. && python src/server/${{search_space.alg}}.py
+    --model=lenet5
+    --dataset=cifar10
+    --pretrain_epoch=50
+    --finetune_epoch=5
+    --batch_size=128
+    --global_epoch=0
+    --test_gap=1
+    --local_epoch=0
+    --local_lr=0.01
+    --server_cuda=1
+    --client_cuda=1
+    --visible=0
+  environment: 
+    conda_file: ./conda.yaml
+    image: mcr.microsoft.com/azureml/openmpi4.1.0-cuda11.6-cudnn8-ubuntu20.04

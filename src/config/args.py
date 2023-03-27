@@ -8,7 +8,7 @@ def get_fedavg_argparser() -> ArgumentParser:
         "-m",
         "--model",
         type=str,
-        default="mobile",
+        default="lenet5",
         choices=["lenet5", "2nn", "avgcnn", "mobile", "res18", "alex"],
     )
     parser.add_argument(
@@ -33,7 +33,7 @@ def get_fedavg_argparser() -> ArgumentParser:
             "tiny_imagenet",
             "cinic10",
         ],
-        default="cifar100",
+        default="cifar10",
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -61,7 +61,7 @@ def get_fedavg_argparser() -> ArgumentParser:
         "-ge",
         "--global_epoch",
         type=int,
-        default=1,
+        default=0,
         help="Global epoch, also called communication round.",
     )
     parser.add_argument(
@@ -75,7 +75,7 @@ def get_fedavg_argparser() -> ArgumentParser:
         "-fe",
         "--finetune_epoch",
         type=int,
-        default=0,
+        default=10,
         help="Clients would fine-tune their model before test.",
     )
     parser.add_argument(

@@ -28,11 +28,12 @@ def main(args):
 
     if args.pretrain_fraction > 0:
         assert args.pretrain_fraction < 1 and int(args.pretrain_fraction * 100) == args.pretrain_fraction * 100, "pretrain_fraction should be a float number between 0 and 1 with at most 2 decimal places."
-        assert int(args.client_num_in_total/(1-args.pretrain_fraction)) == args.client_num_in_total/(1-args.pretrain_fraction), "client_num_in_total should be divisible by 1-pretrain_fraction without remainder."
-        args.client_num_in_total = int(args.client_num_in_total/(1-args.pretrain_fraction))
+        assert int(args.client_num_in_total/round(1-args.pretrain_fraction, 2)) == args.client_num_in_total/round(1-args.pretrain_fraction, 2), "client_num_in_total should be divisible by 1-pretrain_fraction without remainder."
+        args.client_num_in_total = int(args.client_num_in_total/round(1-args.pretrain_fraction, 2))
 
     partition = {"separation": None, "data_indices": None}
 
+    print(f"Dataset: {args.dataset}")
     if args.dataset == "femnist":
         partition, stats = process_femnist(args)
     elif args.dataset == "celeba":
@@ -40,7 +41,9 @@ def main(args):
     elif args.dataset == "synthetic":
         partition, stats = generate_synthetic_data(args)
     else:  # MEDMNIST, COVID, MNIST, CIFAR10, ...
+        print(f"Downloading {args.dataset} dataset to {dataset_root}, with args: {args}")
         ori_dataset = DATASETS[args.dataset](dataset_root, args)
+        print("Download done.")
 
         if not args.iid:
             if args.alpha > 0:  # Dirichlet(alpha)
@@ -72,6 +75,7 @@ def main(args):
             partition, stats = iid_partition(
                 ori_dataset=ori_dataset, num_clients=args.client_num_in_total
             )
+    print("Partitioning done.")
 
     if args.pretrain_fraction > 0:
         pretrain_stats = {"x": 0, "y": Counter()}
@@ -82,11 +86,20 @@ def main(args):
             del stats[i]
 
         stats["pretrain"] = pretrain_stats
-        partition["data_indices_pretrain"] = partition["data_indices"][int(args.pretrain_fraction*args.client_num_in_total):]
-        partition["data_indices_pretrain"]  = np.concatenate(partition["data_indices_pretrain"])
-        partition["data_indices"] = partition["data_indices"][:int(args.pretrain_fraction*args.client_num_in_total)]
-        args.client_num_in_total = int(args.client_num_in_total*(1-args.pretrain_fraction))
+        data_indices_pretrain = partition["data_indices"][int(args.pretrain_fraction*args.client_num_in_total):]
+        data_indices_pretrain = np.concatenate(data_indices_pretrain)
+        num_train_samples = int(len(data_indices_pretrain) * args.fraction)
+        np.random.shuffle(data_indices_pretrain)
+        partition["data_indices_pretrain"] = {
+            "train": data_indices_pretrain[:num_train_samples],
+            "test": data_indices_pretrain[num_train_samples:],
+        }
 
+        partition["data_indices"] = partition["data_indices"][:int(args.pretrain_fraction*args.client_num_in_total)]
+        args.client_num_in_total = int(args.client_num_in_total*round(1-args.pretrain_fraction, 2))
+
+    print(f"Stats: {stats}")
+    
     if partition["separation"] is None:
         if args.split == "user":
             train_clients_num = int(args.client_num_in_total * args.fraction)
@@ -118,6 +131,7 @@ def main(args):
                 else:
                     partition["data_indices"][client_id] = {"train": [], "test": idx}
 
+    print("Writing partition file...")
     with open(_CURRENT_DIR.parent / args.dataset / "partition.pkl", "wb") as f:
         pickle.dump(partition, f)
 
@@ -126,6 +140,7 @@ def main(args):
 
     with open(_CURRENT_DIR.parent / args.dataset / "args.json", "w") as f:
         json.dump(prune_args(args), f)
+    print("Done!")
 
 
 if __name__ == "__main__":
@@ -155,16 +170,16 @@ if __name__ == "__main__":
         default="cifar100",
     )
     parser.add_argument("--iid", type=int, default=0)
-    parser.add_argument("-cn", "--client_num_in_total", type=int, default=100)
+    parser.add_argument("-cn", "--client_num_in_total", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--split", type=str, choices=["sample", "user"], default="sample"
     )
     parser.add_argument(
-        "--fraction", type=float, default=0.5, help="Propotion of train data/clients"
+        "--fraction", type=float, default=0.8, help="Propotion of train data/clients"
     )
     parser.add_argument(
-        "--pretrain_fraction", type=float, default=0.5, help="Propotion of pretrain data"
+        "--pretrain_fraction", type=float, default=0.8, help="Propotion of pretrain data"
     )
     # For random assigning classes only
     parser.add_argument(
